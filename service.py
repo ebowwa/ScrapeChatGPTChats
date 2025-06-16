@@ -4,6 +4,27 @@ from bs4 import BeautifulSoup
 import json
 import re
 
+
+def _parse_react_router_stream(html_text):
+    """Attempt to extract serverResponse JSON from React Router streaming."""
+    pieces = re.findall(r"streamController.enqueue\(\"(.*?)\"\)", html_text)
+    if not pieces:
+        return None
+
+    joined = "".join(pieces)
+    try:
+        decoded = bytes(joined, "utf-8").decode("unicode_escape")
+    except Exception:
+        decoded = joined
+
+    sr_match = re.search(r'"serverResponse":({.*?})', decoded)
+    if not sr_match:
+        return None
+    try:
+        return json.loads(sr_match.group(1))
+    except json.JSONDecodeError:
+        return None
+
 def scrape_chatgpt_conversation(share_link):
     try:
         response = requests.get(share_link)
@@ -12,15 +33,19 @@ def scrape_chatgpt_conversation(share_link):
         soup = BeautifulSoup(response.text, 'html.parser')
 
         script_tag = soup.find('script', string=re.compile('window.__remixContext'))
+        data = None
+        if script_tag:
+            json_str = re.search(r'window\.__remixContext\s*=\s*({.*?});', script_tag.string, re.DOTALL)
+            if json_str:
+                data = json.loads(json_str.group(1))
+        else:
+            if soup.find('script', string=re.compile('window.__reactRouterContext')):
+                server_response = _parse_react_router_stream(response.text)
+                if server_response:
+                    data = {'state': {'loaderData': server_response}}
 
-        if not script_tag:
+        if not data:
             return None
-
-        json_str = re.search(r'window\.__remixContext\s*=\s*({.*?});', script_tag.string, re.DOTALL)
-        if not json_str:
-            return None
-        
-        data = json.loads(json_str.group(1))
 
         loader_data = data.get('state', {}).get('loaderData', {})
         meta_data = loader_data.get('meta', {})
@@ -51,7 +76,7 @@ def scrape_chatgpt_conversation(share_link):
 
         return analysis
 
-    except requests.RequestException as e:
+    except requests.RequestException:
         return None
 
 
@@ -83,15 +108,19 @@ def extract_chat_messages(share_link):
         soup = BeautifulSoup(response.text, 'html.parser')
 
         script_tag = soup.find('script', string=re.compile('window.__remixContext'))
+        data = None
+        if script_tag:
+            json_str = re.search(r'window\.__remixContext\s*=\s*({.*?});', script_tag.string, re.DOTALL)
+            if json_str:
+                data = json.loads(json_str.group(1))
+        else:
+            if soup.find('script', string=re.compile('window.__reactRouterContext')):
+                server_response = _parse_react_router_stream(response.text)
+                if server_response:
+                    data = {'state': {'loaderData': {'routes/share.$shareId.($action)': {'serverResponse': {'data': server_response}}}}}
 
-        if not script_tag:
+        if not data:
             return None
-
-        json_str = re.search(r'window\.__remixContext\s*=\s*({.*?});', script_tag.string, re.DOTALL)
-        if not json_str:
-            return None
-        
-        data = json.loads(json_str.group(1))
 
         server_response = data.get('state', {}).get('loaderData', {}).get('routes/share.$shareId.($action)', {}).get('serverResponse', {}).get('data', {})
         
@@ -106,5 +135,6 @@ def extract_chat_messages(share_link):
         
         return chat_messages if chat_messages else None
 
-    except requests.RequestException as e:
+    except requests.RequestException:
         return None
+
